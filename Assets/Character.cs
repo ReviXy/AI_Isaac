@@ -1,10 +1,12 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.Tilemaps;
 using Unity.MLAgents;
 using Unity.MLAgents.Sensors;
 using Unity.MLAgents.Actuators;
+using Pathfinding;
 
 public class Character : Agent {
 
@@ -40,10 +42,19 @@ public class Character : Agent {
 
     public List<GameObject> tilemapList;
 
+    //public RenderTexture rt;
+    //Texture2D texture;
+
+    const int tileRange = 3;
+    Vector2 tlSize = new Vector2Int(13, 7);
+
+    float episodeStart = 0f;
 
     private void Start()
     {
         rb = GetComponent<Rigidbody2D>();
+
+        //GetComponent<RenderTextureSensorComponent>().RenderTexture = rt;
     }
 
     int sign(float a)
@@ -88,6 +99,7 @@ public class Character : Agent {
         GameObject tear = Instantiate(tearPrefab, new Vector3(transform.position.x, transform.position.y - 0.25f, transform.position.z), transform.rotation) as GameObject;
         tear.GetComponent<Tear>().range = tearRange;
         tear.GetComponent<Tear>().damage = tearDamage;
+        tear.GetComponent<Tear>().rb = tear.GetComponent<Rigidbody2D>();
         if (shootHor != 0 && shootVert != 0) shootHor = 0;
         Vector2 temp = movement.normalized * moveSpeed / 2f;
         float addSpeed = (shootHor != 0 ? (sign(temp.x) == sign(shootHor) ? Mathf.Abs(temp.x) : 0) : (sign(temp.y) == sign(shootVert) ? Mathf.Abs(temp.y) : 0));
@@ -96,13 +108,13 @@ public class Character : Agent {
 
     public void Damaged(int damage)
     {
-        AddReward(-0.1f);
+        AddReward(-0.5f);
         if (Time.time > lastHit + immunityFrames)
         {
             curHP = curHP - damage;
             if (curHP <= 0)
             {
-                AddReward(-1f);
+                AddReward(-5f);
                 EndEpisode();
             }
             else
@@ -133,7 +145,8 @@ public class Character : Agent {
 
     public override void OnEpisodeBegin()
     {
-        Enemy.ID_setter = 0;
+        //Enemy.ID_setter = 0;
+        SetReward(0);
         Destroy(FindObjectOfType<Tilemap>().gameObject);
         Instantiate(tilemapList[(new System.Random()).Next(0, tilemapList.Count)], FindObjectOfType<Grid>().transform);
 
@@ -157,14 +170,30 @@ public class Character : Agent {
 
         transform.position = new Vector3(x, y, 0);
         rb.velocity = Vector2.zero;
+        episodeStart = Time.time;
     }
 
     public override void OnActionReceived(ActionBuffers actions)
     {
-        movement.x = actions.ContinuousActions[0];
-        movement.y = actions.ContinuousActions[1];
-        shootHor = actions.ContinuousActions[2];
-        shootVert = actions.ContinuousActions[3];
+        movement = Vector2.zero;
+        shootHor = 0;
+        shootVert = 0;
+
+        movement.x = actions.DiscreteActions[0] - 1;
+        movement.y = actions.DiscreteActions[1] - 1;
+        shootHor = actions.DiscreteActions[2] - 1;
+        shootVert = actions.DiscreteActions[3] - 1;
+
+        /*
+        if (actions.DiscreteActions[0] == 0) movement.x = -1;
+        if (actions.DiscreteActions[0] == 2) movement.x = 1;
+        if (actions.DiscreteActions[1] == 0) movement.y = -1;
+        if (actions.DiscreteActions[1] == 2) movement.y = 1;
+        if (actions.DiscreteActions[2] == 0) shootHor = -1;
+        if (actions.DiscreteActions[2] == 2) shootHor = 1;
+        if (actions.DiscreteActions[3] == 0) shootVert = -1;
+        if (actions.DiscreteActions[3] == 2) shootVert = 1;
+        */
 
         if ((shootHor != 0 || shootVert != 0) && Time.time > lastFire + fireDelay)
         {
@@ -174,13 +203,19 @@ public class Character : Agent {
 
         if (FindObjectsOfType<Enemy>().Length == 0)
         {
-            AddReward(1f);
+            AddReward(10f);
+            EndEpisode();
+        }
+
+        if (Time.time > episodeStart + 120)
+        {
+            AddReward(-5f);
             EndEpisode();
         }
 
         AddReward(-0.0001f);
     }
-    
+
     public override void CollectObservations(VectorSensor sensor)
     {
         // GET CHARACTER INFO
@@ -190,78 +225,114 @@ public class Character : Agent {
         sensor.AddObservation(rb.velocity.y);
 
         // GET TEAR INFO
-        sensor.AddObservation(lastHitEnemyID);
+        float cd = fireDelay - (Time.time - lastFire);
+        if (cd < 0) cd = 0;
+        sensor.AddObservation(cd);
+
+        int amount = 3;
+        Tear[] lst1 = FindObjectsOfType<Tear>();
+        int len = lst1.Length;
+
+        var a = new List<(Vector3 pos, Vector3 vel, float dist)>();
+
+        for (int i = 0; i < len; i++)
+            a.Add((lst1[i].transform.position, lst1[i].rb.velocity,
+                Dist(transform.position.x, transform.position.y, lst1[i].transform.position.x, lst1[i].transform.position.y)));
+
+        a.Sort((x, b) => x.dist.CompareTo(b.dist));
+
+        int c = 0;
+        while (c < amount && c < len)
+        {
+            sensor.AddObservation(a[c].pos.x);
+            sensor.AddObservation(a[c].pos.y);
+            sensor.AddObservation(a[c].vel.x);
+            sensor.AddObservation(a[c].vel.y);
+            c++;
+        }
+        while (c < amount)
+        {
+            sensor.AddObservation(999f);
+            sensor.AddObservation(999f);
+            sensor.AddObservation(0f);
+            sensor.AddObservation(0f);
+            c++;
+        }
 
         // GET TILE INFO
-        int r = 3;
-        for (int i = 0; i < 2 * r + 1; i++)
-            for (int j = 0; j < 2 * r + 1; j++)
+        /*
+        texture = new Texture2D(2 * tileRange + 1, 2 * tileRange + 1);
+        texture.filterMode = FilterMode.Point;
+        for (int i = 0; i < 2 * tileRange + 1; i++)
+            for (int j = 0; j < 2 * tileRange + 1; j++)
             {
-                Vector3Int coor = tm.WorldToCell(transform.position) + new Vector3Int(i - r, j - r, 0);
-                if (coor.x >= tm.size.x || coor.y >= tm.size.y || coor.x < 0 || coor.y < 0) sensor.AddObservation(-1); // out of bounds
+                Vector3Int coor = tm.WorldToCell(transform.position) + new Vector3Int(i - tileRange, j - tileRange, 0);
+
+                if (coor.x >= tlSize.x || coor.y >= tlSize.y || coor.x < 0 || coor.y < 0) texture.SetPixel(i, j, Color.black); // out of bounds
                 else
                 {
                     TileBase tile = tm.GetTile(coor);
-                    if (tile == null) sensor.AddObservation(0); // air
+                    if (tile == null) texture.SetPixel(i, j, Color.white); // air
                     else switch (tile.name)
                         {
-                            case "Rock": sensor.AddObservation(1); break;
-                            case "Fire_Place": sensor.AddObservation(2); break;
+                            case "Rock": texture.SetPixel(i, j, Color.blue); break;
+                            case "Fire_Place": texture.SetPixel(i, j, Color.red); break;
                             default: break;
                         }
                 }
             }
+        texture.SetPixel(tileRange, tileRange, Color.green);
+        texture.Apply();
+        Graphics.Blit(texture, rt);
+        */
 
         // GET ENEMY INFO
-        int amount = 5;
+        amount = 5;
         Enemy[] lst = FindObjectsOfType<Enemy>();
-        int len = lst.Length;
-
-        var e = new List<(int type, int ID, float x, float y, float dist)>();
+        len = lst.Length;
+        
+        var e = new List<(int type, float hp, Vector3 pos, Vector3 vel, float dist)>();
 
         for (int i = 0; i < len; i++)
-            e.Add((GetEnemyType(lst[i].name), lst[i].ID, lst[i].transform.position.x, lst[i].transform.position.y,
+            e.Add((GetEnemyType(lst[i].name), lst[i].curHP, lst[i].transform.position, lst[i].GetComponent<AIPath>().desiredVelocity,
                 Dist(transform.position.x, transform.position.y, lst[i].transform.position.x, lst[i].transform.position.y)));
 
         e.Sort((a, b) => a.dist.CompareTo(b.dist));
 
-        if (len >= amount)
+        c = 0;
+        while (c < amount && c < len)
         {
-            for (int i = 0; i < amount; i++)
-            {
-                sensor.AddObservation(e[i].type);
-                sensor.AddObservation(e[i].ID);
-                sensor.AddObservation(e[i].x);
-                sensor.AddObservation(e[i].y);
-            }
+            sensor.AddOneHotObservation(e[c].type, 4);
+            sensor.AddObservation(e[c].hp);
+            sensor.AddObservation(e[c].pos.x);
+            sensor.AddObservation(e[c].pos.y);
+            sensor.AddObservation(e[c].vel.x);
+            sensor.AddObservation(e[c].vel.y);
+            c++;
         }
-        else
+        while (c < amount)
         {
-            for (int i = 0; i < len; i++)
-            {
-                sensor.AddObservation(e[i].type);
-                sensor.AddObservation(e[i].ID);
-                sensor.AddObservation(e[i].x);
-                sensor.AddObservation(e[i].y);
-            }
-            for (int i = 0; i < amount - len; i++)
-            {
-                sensor.AddObservation(-1);
-                sensor.AddObservation(-1);
-                sensor.AddObservation(0);
-                sensor.AddObservation(0);
-            }
+            sensor.AddOneHotObservation(-1, 4);
+            sensor.AddObservation(0f);
+            sensor.AddObservation(999f);
+            sensor.AddObservation(999f);
+            sensor.AddObservation(0f);
+            sensor.AddObservation(0f);
+            c++;
         }
+
+        
+
     }
     
 
     public override void Heuristic(in ActionBuffers actionsOut)
     {
-        var continuousActionsOut = actionsOut.ContinuousActions;
-        continuousActionsOut[0] = Input.GetAxis("Horizontal");
-        continuousActionsOut[1] = Input.GetAxis("Vertical");
-        continuousActionsOut[2] = Input.GetAxis("ShootHorizontal");
-        continuousActionsOut[3] = Input.GetAxis("ShootVertical");
+        var discreteActionsOut = actionsOut.DiscreteActions;
+        discreteActionsOut[0] = (int)Input.GetAxis("Horizontal") + 1;
+        discreteActionsOut[1] = (int)Input.GetAxis("Vertical") + 1;
+        discreteActionsOut[2] = (int)Input.GetAxis("ShootHorizontal") + 1;
+        discreteActionsOut[3] = (int)Input.GetAxis("ShootVertical") + 1;
     }
 
     /*

@@ -9,7 +9,7 @@ public class Enemy : MonoBehaviour
     Character character;
 
     public float maxHP;
-    float curHP;
+    public float curHP;
     public float speed;
 
     public static int ID_setter = 0;
@@ -31,7 +31,7 @@ public class Enemy : MonoBehaviour
             curHP = curHP - damage;
             if (curHP <= 0)
             {
-                FindObjectOfType<Character>().AddReward(0.1f);
+                FindObjectOfType<Character>().AddReward(1.5f);
                 Destroy(gameObject);
             }
     }
